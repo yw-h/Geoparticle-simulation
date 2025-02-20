@@ -2,7 +2,7 @@ import time
 import numpy as np
 from scipy import constants as C
 from scipy.special import erf
-from numba import jit
+# from numba import jit
 from typing import Dict, Tuple, List
 from matplotlib import pyplot as plt
 import matplotlib.patches as patches
@@ -202,8 +202,15 @@ class ParticleSimulator:
 
         # 地球磁场计算（向量化）
         B = np.zeros(3)
+        B_dipole = np.zeros(3)
         r = np.linalg.norm(position)
-        B[2] = 0.311e5 * 1 / r**3
+        B_dipole[2] = 0.311e5 * 1 / r**3
+
+        # 磁场压缩模型（简化，时间依赖）
+        compression_factor = self._compute_compression_factor(t) # 磁场压缩因子
+        B_compressed = B_dipole * compression_factor
+        
+        B = B_compressed # 使用压缩的偶极场作为背景场
 
         # 脉冲场计算
         E = np.zeros(3)
@@ -211,7 +218,99 @@ class ParticleSimulator:
             E_pulse, B_pulse = self._compute_pulse_fields(t, position)
             B += B_pulse * 1e9
             E += E_pulse
+
+        # 压缩磁场的感生电场计算
+        E_induce = self._compute_compressed_field_induced_Efield(t, position)
+        E += E_induce
+
         return B, E
+    
+    def _compute_compression_factor(self, t:float):
+        """计算磁场压缩因子
+        Args:
+            t:时间（s）
+        Return:
+            compressional_factor
+        """
+        t_start = 180 # 压缩开始时间
+        t_peak= 340 # 压缩峰值时间
+        t_end = 500 # 压缩结束时间
+        compression_max = 1.2 # 最大压缩倍数
+
+        if t < t_start:
+            compression_factor = 1.0
+
+        elif t < t_peak:
+            # 线性增长至峰值
+            compression_factor = 1 + (compression_max - 1) * (t - t_start) / (t_peak - t_start)
+        
+        elif t < t_end:
+            # 衰减回1， 或其他值
+            # tau = (t_end - t_peak) / 1 # 特征衰减时间
+            # compression_factor = compression_max * np.exp(-(t-t_peak) / tau)
+            compression_factor = (compression_max - 1) * (t_end - t) / (t_end - t_peak) + 1
+        else:
+            compression_factor = 1.0 # 压缩结束后衰减回1
+        
+        return compression_factor
+    
+    def _compute_compression_factor_derivative(self, t:float):
+        """
+            计算压缩系数对时间倒数
+        """
+        t_start = 180 # 压缩开始时间
+        t_peak= 340 # 压缩峰值时间
+        t_end = 500 # 压缩结束时间
+        compression_max = 1.2 # 最大压缩倍数  
+
+        if t < t_start:
+            return 0.0
+
+        elif t < t_peak:
+            return (compression_max - 1) / (t_peak - t_start)
+        
+        elif t < t_end:
+            return - (compression_max - 1) / (t_end - t_peak)
+        
+        else:
+            return 0.0
+    
+    def _compute_compressed_field_induced_Efield(self, t:float, position:np.ndarray):
+        """计算压缩磁场的感生电场
+        Args:
+            t, position(Re)
+        return:
+            E_induced: V/m
+        """
+        c_prime_t = self._compute_compression_factor_derivative(t)
+        if abs(c_prime_t) < 1e-12:
+            return np.zeros(3)
+        
+        x, y, _ = position
+        r_xy = np.hypot(x, y) # np.sqrt(x**2+y**2) /Re
+        if r_xy < 1e-9:
+            return np.zeros(3)
+        
+        r0_Re = 1.5 # 1.5Re处认为感生电场为0
+        B0 = 0.311e5 # 偶极场系数
+        e_phi_magnitude = c_prime_t * B0 * (1 / r_xy**2) - 1/(r_xy * r0_Re)
+
+        # 球坐标单位向量计算(简化)
+        r = np.linalg.norm(position)
+        er = position / r
+        ew = np.array([-position[1], position[0], 0]) / np.hypot(position[0], position[1])
+
+        # e_phi_x = - (y/r_xy) * e_phi_magnitude
+        # e_phi_y = (x/r_xy) * e_phi_magnitude
+        # e_phi_z = 0
+
+        E_induced = - e_phi_magnitude * ew * 1e-3 # V/m
+
+        return E_induced
+
+
+
+    
     
     def _compute_pulse_fields(self, t:float, position:np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         """计算脉冲电场和磁场
@@ -223,74 +322,79 @@ class ParticleSimulator:
             E_pulse: V/m
             B_pulse: T
         """
-        
+
         position = position * self.Re # Re转换成m
+        E_pulse_total = np.zeros(3) # 初始化总电场脉冲
+        B_pulse_total = np.zeros(3) # 初始化总磁场脉冲
         # 参数解包
-        params = self.pulse_params
-        phi0 = params["phi0"]
-        phi = np.mod(np.rad2deg(np.arctan2(position[1], position[0])) + 360, 360)
-        dphi = np.deg2rad(phi - phi0)
-        E0 = params["E0"] * 1e-3 # mV/m -> V/m
-        vr = self._compute_pulse_velocity(position)
-        c0 = params.get("c0")
-        c1 = params.get("c1")
-        c2 = params.get("c2")
-        c3 = params.get("c3")
-        p = params.get("p")
-        rd = params.get("rd")
-        va = params.get("va")
-        ri = params.get("ri")
-        ti = params.get("ti")
-        di = params.get("di")
+        for pulse_params in self.pulse_params_list:
+            params = pulse_params
+            phi0 = params["phi0"]
+            phi = np.mod(np.rad2deg(np.arctan2(position[1], position[0])) + 360, 360)
+            dphi = np.deg2rad(phi - phi0)
+            E0 = params["E0"] * 1e-3 # mV/m -> V/m
+            vr = self._compute_pulse_velocity(position, params)
+            c0 = params.get("c0")
+            c1 = params.get("c1")
+            c2 = params.get("c2")
+            c3 = params.get("c3")
+            p = params.get("p")
+            rd = params.get("rd")
+            va = params.get("va")
+            ri = params.get("ri")
+            ti = params.get("ti")
+            di = params.get("di")
 
-        # 球坐标单位向量计算(简化)
-        r = np.linalg.norm(position)
-        er = position / r
-        ew = np.array([-position[1], position[0], 0]) / np.hypot(position[0], position[1])
-        eu = np.cross(er, ew)
+            # 球坐标单位向量计算(简化)
+            r = np.linalg.norm(position)
+            er = position / r
+            ew = np.array([-position[1], position[0], 0]) / np.hypot(position[0], position[1])
+            eu = np.cross(er, ew)
 
-        # 脉冲时空分布计算（向量化）
-        t0 = (c3 * self.Re / va) * (1 - np.cos(dphi))
-        iexp = (r - ri + vr * (t - t0 - ti)) / di
-        rexp= (r - ri - c0 * vr * (t - t0 - ti) - rd * self.Re) / di
+            # 脉冲时空分布计算（向量化）
+            t0 = (c3 * self.Re / va) * (1 - np.cos(dphi))
+            iexp = (r - ri + vr * (t - t0 - ti)) / di
+            rexp= (r - ri - c0 * vr * (t - t0 - ti) - rd * self.Re) / di
 
-        # 电场脉冲
-        # EFw 纬向电场
-        E0ampl = E0 * (1 + c1 * np.cos(np.deg2rad(phi - phi0)))**p
-        EFw = E0ampl * (np.exp(-iexp**2) - c2 * np.exp(-rexp**2))
-        E_pulse = -EFw * ew
+            # 电场脉冲
+            # EFw 纬向电场
+            E0ampl = E0 * (1 + c1 * np.cos(np.deg2rad(phi - phi0)))**p
+            EFw = E0ampl * (np.exp(-iexp**2) - c2 * np.exp(-rexp**2))
+            E_pulse = -EFw * ew
+            E_pulse_total += E_pulse # 累加电场脉冲
 
-        # 磁场脉冲
-        # Btheta 经线方向磁场
-        dE0ampl = E0 * p * (1 + c1 * np.cos(dphi))**(p-1) # partial differentiation with respect to phis
-        dvr = 0 # dv/dr, vpulse=const in this case
-        Bu1_in_a = np.exp(-iexp**2)*(1+dvr*(t-t0-ti))/vr
-        Bu1_in_b = -(di*np.sqrt(np.pi)*dvr/(2*vr**2))
-        Bu1_re_a = np.exp(-rexp**2)*(-1.0+dvr*(t-t0-ti))/vr
-        Bu1_re_b = (di*np.sqrt(np.pi)*dvr/(2*c0*vr**2))*(-1+erf(rexp))
-        Bu1 = E0ampl * ( (Bu1_in_a + Bu1_in_b) - c2*(Bu1_re_a + Bu1_re_b) )
-        Bu2_in = (1+erf(iexp))/(2*r*vr)
-        Bu2_re = (-1+erf(rexp))/(2*r*vr)
-        Bu2 = E0ampl*di*np.sqrt(np.pi)*(Bu2_in+(c2/c0)*Bu2_re)
-        BFu = Bu1+Bu2
-        Bu = BFu * eu
+            # 磁场脉冲
+            # Btheta 经线方向磁场
+            dE0ampl = E0 * p * (1 + c1 * np.cos(dphi))**(p-1) # partial differentiation with respect to phis
+            dvr = 0 # dv/dr, vpulse=const in this case
+            Bu1_in_a = np.exp(-iexp**2)*(1+dvr*(t-t0-ti))/vr
+            Bu1_in_b = -(di*np.sqrt(np.pi)*dvr/(2*vr**2))
+            Bu1_re_a = np.exp(-rexp**2)*(-1.0+dvr*(t-t0-ti))/vr
+            Bu1_re_b = (di*np.sqrt(np.pi)*dvr/(2*c0*vr**2))*(-1+erf(rexp))
+            Bu1 = E0ampl * ( (Bu1_in_a + Bu1_in_b) - c2*(Bu1_re_a + Bu1_re_b) )
+            Bu2_in = (1+erf(iexp))/(2*r*vr)
+            Bu2_re = (-1+erf(rexp))/(2*r*vr)
+            Bu2 = E0ampl*di*np.sqrt(np.pi)*(Bu2_in+(c2/c0)*Bu2_re)
+            BFu = Bu1+Bu2
+            Bu = BFu * eu
 
-        #Brad 径向方向磁场
-        Br_in = E0ampl*di*np.sqrt(np.pi)*( -1+erf(iexp))/(2*r*vr)
-        Br_re = (c2/c0)*E0ampl*di*np.sqrt(np.pi)*(1+erf(rexp))/(2*r*vr)
-        urad = np.arcsin(1)	# equatorial plane: theta = 90 deg
-        BFr = -(1/np.tan(urad))*(Br_in + Br_re)
-        Br = -BFr  *er
-        B_pulse = Bu + Br
-        # B_pulse = np.zeros_like(E_pulse)  # 简化磁场计算，暂时不考虑脉冲磁场
+            #Brad 径向方向磁场
+            Br_in = E0ampl*di*np.sqrt(np.pi)*( -1+erf(iexp))/(2*r*vr)
+            Br_re = (c2/c0)*E0ampl*di*np.sqrt(np.pi)*(1+erf(rexp))/(2*r*vr)
+            urad = np.arcsin(1)	# equatorial plane: theta = 90 deg
+            BFr = -(1/np.tan(urad))*(Br_in + Br_re)
+            Br = -BFr  *er
+            B_pulse = Bu + Br
+            B_pulse = np.zeros_like(E_pulse)  # 简化磁场计算，暂时不考虑脉冲磁场
+            B_pulse_total += B_pulse # 累加磁场脉冲
+            
         
-        return E_pulse, B_pulse      
+        return E_pulse_total, B_pulse_total      
     
-    def _compute_pulse_velocity(self, position:np.ndarray) -> float:
+    def _compute_pulse_velocity(self, position:np.ndarray, params:Dict) -> float:
         """计算脉冲速度
         Args:
-            position: 粒子位置（Re单位）"""
-        params = self.pulse_params
+            position: 粒子位置（m）"""
         vpulse = params["vpulse"] # m/s
         if vpulse == 1:
             a = 53.15 * 0.8
@@ -366,45 +470,6 @@ class ParticleSimulator:
         
         return v_drift_total
     
-    @staticmethod
-    @jit(nopython=True)
-    def _compute_drift_velocity_static(position, t, magnetic_field, electric_field, magnetic_moment, energy, particle_mass, particle_charge, Re_val, c_val):
-        """静态方法计算漂移速度 (jit 优化)"""
-        B = magnetic_field
-        E = electric_field
-        mu = magnetic_moment
-        m0 = particle_mass
-        q = particle_charge
-        Re = Re_val
-        c = c_val
-
-        # ---- 2. 计算磁场梯度（垂直分量） ----
-        B_mag = np.linalg.norm(B)
-        if B_mag < 1e-15:
-            return np.zeros(3)
-
-        # 这里假设 _perpgradB 也被改造成静态方法
-        grad_B_perp = ParticleSimulator._perpgradB_static(t, position/Re, magnetic_field_func=ParticleSimulator._compute_fields_static) # 需要传递计算磁场的函数
-
-        # ---- 3. 计算磁矩μ ---- (mu 已经作为参数传入)
-        total_energy_j = energy  # 总能量（J）
-        gamma = total_energy_j / (m0 * c**2) # Lorentz因子
-
-        # ---- 4. 计算梯度漂移速度 ----
-        B_unit = B / B_mag
-        grad_B_cross_B = np.cross(grad_B_perp, B_unit)
-        vfact = mu * 1/B_mag * 1/gamma * 1/Re * 1E9 * q / C.elementary_charge
-        v_grad = vfact * grad_B_cross_B
-
-        # ---- 5. 计算E×B漂移速度 ----
-        B_T = B * 1e-9 # nT -> T
-        E_x_B = np.cross(E, B_T)
-        v_ExB = E_x_B / (np.linalg.norm(B_T)**2) # m/s
-
-        # ---- 6. 计算总漂移速度 ----
-        v_drift_total = v_ExB + v_grad
-
-        return v_drift_total
     
     def _perpgradB(self, t:float, position_re:np.ndarray) -> np.ndarray:
         """计算磁场垂直梯度

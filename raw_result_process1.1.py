@@ -13,7 +13,8 @@ from math import ceil
 
 from scipy.interpolate import interp2d, RectBivariateSpline
 import pandas as pd
-
+import warnings
+warnings.filterwarnings("ignore")
 
 class FluxCalculator:
     def __init__(self, csv_file, interpolation_method='cubic'):
@@ -124,7 +125,7 @@ def kec_label_batch(wtot_array):
     kec_array = (wtot_array / C.elementary_charge / 1e6 - 0.511) * 1000
     # 定义能道区间和对应的能道标签
     ranges = [
-        (300, 600, 500),
+        (300, 700, 500),
         (700, 900, 800),
         (900, 1200, 1000),
         (1200, 1600, 1500),
@@ -156,20 +157,20 @@ def double_normal_distribution(x, amplitude, mean, stddev):
     return guass1 + guass2
 
 
-def exp_param_dict():
-    Ls = np.arange(3, 7.5, 0.01)
-    Ls = np.round(Ls, 2)
-    exp_dict = {L:[] for L in Ls}
-    for L in Ls:
-        L_temp = 6.54 if L > 6.54 else L
-        fit_flux = observed_flux
-        xdata = fit_flux["Kec"]
-        ydata = fit_flux["{:.2f}".format(L_temp)]
+# def exp_param_dict():
+#     Ls = np.arange(3, 7.5, 0.01)
+#     Ls = np.round(Ls, 2)
+#     exp_dict = {L:[] for L in Ls}
+#     for L in Ls:
+#         L_temp = 6.54 if L > 6.54 else L
+#         fit_flux = observed_flux
+#         xdata = fit_flux["Kec"]
+#         ydata = fit_flux["{:.2f}".format(L_temp)]
         
-        ydata = ydata / integrate.trapz(ydata, xdata) 
-        popt, pcov = curve_fit(func_exp, xdata[14:], ydata[14:], p0=(1,1,-1))
-        exp_dict[L] = popt
-    return exp_dict
+#         ydata = ydata / integrate.trapz(ydata, xdata) 
+#         popt, pcov = curve_fit(func_exp, xdata[14:], ydata[14:], p0=(1,1,-1))
+#         exp_dict[L] = popt
+#     return exp_dict
 
 def get_flux_batch(batch_data):
     calculator = FluxCalculator("./observed_flux.csv")
@@ -197,13 +198,13 @@ def get_flux_batch(batch_data):
     weights = calculator.get_weights(L_init, kec_init_array)
     return weights
 
-mageis_observed_flux = pd.read_csv("./mageis_fedu_mean.csv")
-rept_observed_flux = pd.read_csv("./rept_fedu_mean.csv")
-mageis_observed_flux = mageis_observed_flux.loc[mageis_observed_flux["Kec"]<1.6, :]
-observed_flux = pd.merge(mageis_observed_flux, rept_observed_flux, how='outer')
-exp_dict =  exp_param_dict() # 指数分布参数表
+# mageis_observed_flux = pd.read_csv("./mageis_fedu_mean.csv")
+# rept_observed_flux = pd.read_csv("./rept_fedu_mean.csv")
+# mageis_observed_flux = mageis_observed_flux.loc[mageis_observed_flux["Kec"]<1.6, :]
+# observed_flux = pd.merge(mageis_observed_flux, rept_observed_flux, how='outer')
+# exp_dict =  exp_param_dict() # 指数分布参数表
 def process_and_save_timepoint_data(batch_size=10):
-    batch_files_folder = "./result_simpliest/results_batch/"
+    batch_files_folder = "./result_compressedfield/results_batch/"
     batch_files = glob.glob(batch_files_folder + "*.npy")
     kecs = [500, 800, 1000, 1500, 1800, 2100, 2600, 3400, 4200, 5200]
 
@@ -212,7 +213,7 @@ def process_and_save_timepoint_data(batch_size=10):
     time_steps = sample_data.shape[2]
 
     # 创建输出目录
-    output_dir = "./result_simpliest/fixedexp_doublegauss/timepoint_data/"
+    output_dir = "./result_compressedfield/fixedexp_doublegauss/timepoint_data/"
     for t in range(time_steps):
         os.makedirs(output_dir, exist_ok=True)
 
@@ -283,8 +284,8 @@ def process_and_save_timepoint_data(batch_size=10):
                 print(f"KEC {kec:.1f}: Particles per timestep = {particle_counts}")
 
 
-def process_and_save_initkec_data()
-    batch_files_folder = r"./result_simpliest/results_batch/"
+def process_and_save_initkec_data():
+    batch_files_folder = r"./result_compressedfield/results_batch/"
     batch_files = glob.glob(batch_files_folder+"*.npy")
     file_shapes = {file: np.load(file, mmap_mode='r').shape[0] for file in batch_files} # 获取每个batch的粒子数
     particle_nums = sum(file_shapes[file] for file in batch_files) # 总粒子数
@@ -297,7 +298,7 @@ def process_and_save_initkec_data()
     kec_indices = {kec: [] for kec in kecs}  # 用于存储每个 kec 的起始索引
     result_shape = (particle_nums, batch_data_sp.shape[1] + 3, batch_data_sp.shape[2])
     result_array = np.zeros(result_shape)  # 预分配结果数组
-    exp_dict =  exp_param_dict() # 指数分布参数表
+    # exp_dict =  exp_param_dict() # 指数分布参数表
 
     current_index = 0
     for batch_file in batch_files:
@@ -333,19 +334,19 @@ def process_and_save_initkec_data()
             kec_data = np.concatenate(
                 [result_array[start:end] for start, end in kec_indices[kec]], axis=0
             )
-            if not os.path.exists("./result_simpliest/init_kec_batch/"):
-                os.makedirs("./result_simpliest/init_kec_batch/")
-            np.save(f"./result_simpliest/init_kec_batch/{kec:.1f}.npy", kec_data)
+            if not os.path.exists("./result_compressedfield/init_kec_batch/"):
+                os.makedirs("./result_compressedfield/init_kec_batch/")
+            np.save(f"./result_compressedfield/init_kec_batch/{kec:.1f}.npy", kec_data)
             print(f"kec={kec}, 数据形状: {kec_data.shape}")
         except Exception as e:
             print(f"kec={kec}, 数据形状: 0 {e}")
 
-mageis_observed_flux = pd.read_csv("./mageis_observed_flux.csv")
-rept_observed_flux = pd.read_csv("./rept_observed_flux.csv")
-mageis_observed_flux = mageis_observed_flux.loc[mageis_observed_flux["Kec"]<1.6, :]
-observed_flux = pd.merge(mageis_observed_flux, rept_observed_flux, how='outer')
+# mageis_observed_flux = pd.read_csv("./mageis_observed_flux.csv")
+# rept_observed_flux = pd.read_csv("./rept_observed_flux.csv")
+# mageis_observed_flux = mageis_observed_flux.loc[mageis_observed_flux["Kec"]<1.6, :]
+# observed_flux = pd.merge(mageis_observed_flux, rept_observed_flux, how='outer')
 
 
-if "__name__" == "__main__":
-    process_and_save_timepoint_data()
-    process_and_save_initkec_data()
+# if "__name__" == "__main__":
+process_and_save_timepoint_data()
+process_and_save_initkec_data()
