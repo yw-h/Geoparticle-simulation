@@ -2,6 +2,7 @@ import numpy as np
 import pandas as pd
 import scipy as sp 
 import os
+import argparse
 
 from scipy import constants as C
 from scipy.optimize import curve_fit
@@ -16,8 +17,9 @@ import pandas as pd
 import warnings
 warnings.filterwarnings("ignore")
 
+from scipy.interpolate import interp2d, RectBivariateSpline
 class FluxCalculator:
-    def __init__(self, csv_file, interpolation_method='cubic'):
+    def __init__(self, csv_file, interpolation_method='linear'):
         """
         初始化通量计算器
         
@@ -26,49 +28,44 @@ class FluxCalculator:
         interpolation_method (str): 插值方法，可选 'linear', 'cubic', 'quintic', 'spline'
         """
         # 读取数据，跳过表头
-        self.df = pd.read_csv(csv_file, header=None)
+        self.df = pd.read_csv(csv_file)
         
         # 获取L值（第一列到倒数第二列）
-        self.L_values = self.df.iloc[0, :-1].astype(float).values
+        self.L_values = self.df.columns[:-1].astype(float).values
         
         # 获取能量值（最后一列，去除第一行的'Kec'）
-        self.energies = self.df.iloc[1:, -1].astype(float).values
+        self.energies = self.df.iloc[:, -1].astype(float).values
         
         # 获取通量数据（去除第一行和最后一列）
-        self.flux_data = self.df.iloc[1:, :-1].astype(float).values
+        self.flux_data = self.df.iloc[:, :-1].astype(float).values
         
         # 计算最大通量值用于归一化
         self.max_flux = np.max(self.flux_data)
         
         # 保存插值方法
         self.interpolation_method = interpolation_method
-        
-        # 创建插值函数
+
         self._create_interpolator()
         
     def _create_interpolator(self):
         """创建二维插值函数"""
-        if self.interpolation_method in ['linear', 'cubic', 'quintic']:
-            self.interpolator = interp2d(
-                self.L_values,
-                self.energies,
-                self.flux_data,
-                kind=self.interpolation_method,
-                bounds_error=False,
-                fill_value=0
-            )
-        elif self.interpolation_method == 'spline':
-            self.interpolator = RectBivariateSpline(
-                self.energies,
-                self.L_values,
-                self.flux_data,
-                kx=3,
-                ky=3,
-                s=0
-            )
-        else:
-            raise ValueError(f"Unsupported interpolation method: {self.interpolation_method}")
-    
+        if self.interpolation_method == "linear":
+            kx = 1
+            ky = 1
+        elif self.interpolation_method == "cubic" or 'spline':
+            kx = 3
+            ky = 3
+        elif self.interpolation_method == "quintic":
+            kx = 5
+            ky = 5
+        self.interpolator = RectBivariateSpline(
+            self.energies, 
+            self.L_values, 
+            self.flux_data, 
+            kx=kx, 
+            ky=ky,
+            s=0)
+
     def get_flux(self, L, energy):
         """
         获取指定L值和能量的通量
@@ -80,14 +77,13 @@ class FluxCalculator:
         Returns:
         float: 插值计算的通量值
         """
-        if (L < np.min(self.L_values) or L > np.max(self.L_values) or 
-            energy < np.min(self.energies) or energy > np.max(self.energies)):
-            return 0
-            
-        if self.interpolation_method == 'spline':
-            return float(self.interpolator(energy, L)[0][0])
-        else:
-            return float(self.interpolator(L, energy))
+        # max_L = np.max(self.L_values) 
+        # L_clipped = min(L, max_L)
+        # if (L_clipped < np.min(self.L_values) or  # 使用裁剪后的 L_clipped 进行范围检查
+        #     energy < np.min(self.energies) or energy > np.max(self.energies)):
+        #     return 0  # 能量超出范围返回 0
+        
+        return self.interpolator(energy, L)[0][0]
     
     def get_particle_weight(self, L, energy):
         """
@@ -104,6 +100,7 @@ class FluxCalculator:
         # 使用最大通量归一化
         weight = max(0, flux) / self.max_flux
         return weight
+        # return flux
     
     def get_weights(self, L_values, energies):
         """
@@ -172,8 +169,8 @@ def double_normal_distribution(x, amplitude, mean, stddev):
 #         exp_dict[L] = popt
 #     return exp_dict
 
-def get_flux_batch(batch_data):
-    calculator = FluxCalculator("./observed_flux.csv")
+def get_flux_batch(batch_data, flux_csv_path="./observed_flux.csv"):
+    calculator = FluxCalculator(flux_csv_path)
     L_shell_array = np.sqrt(batch_data[:, 1, :]**2 + batch_data[:, 2, :]**2, + batch_data[:, 3, :]**2)
     wtot_array = batch_data[:,-1,:]
     flux_array = np.zeros_like(wtot_array)
@@ -203,9 +200,9 @@ def get_flux_batch(batch_data):
 # mageis_observed_flux = mageis_observed_flux.loc[mageis_observed_flux["Kec"]<1.6, :]
 # observed_flux = pd.merge(mageis_observed_flux, rept_observed_flux, how='outer')
 # exp_dict =  exp_param_dict() # 指数分布参数表
-def process_and_save_timepoint_data(batch_size=10):
-    batch_files_folder = "./result_compressedfield/results_batch/"
-    batch_files = glob.glob(batch_files_folder + "*.npy")
+def process_and_save_timepoint_data(input_dir, output_dir, flux_csv_path="./observed_flux.csv",batch_size=10):
+    batch_files_folder = os.path.join(input_dir, "results_batch") # 使用 input_dir
+    batch_files = glob.glob(os.path.join(batch_files_folder, "*.npy"))
     kecs = [500, 800, 1000, 1500, 1800, 2100, 2600, 3400, 4200, 5200]
 
     # 获取时间步长
@@ -213,9 +210,9 @@ def process_and_save_timepoint_data(batch_size=10):
     time_steps = sample_data.shape[2]
 
     # 创建输出目录
-    output_dir = "./result_compressedfield/fixedexp_doublegauss/timepoint_data/"
+    timepoint_output_dir = os.path.join(output_dir, "timepoint_data")
     for t in range(time_steps):
-        os.makedirs(output_dir, exist_ok=True)
+        os.makedirs(timepoint_output_dir, exist_ok=True)
 
     num_batches = ceil(len(batch_files) / batch_size)
 
@@ -226,7 +223,7 @@ def process_and_save_timepoint_data(batch_size=10):
         end_idx = min((batch_idx + 1) * batch_size, len(batch_files))
         current_batch_files = batch_files[start_idx:end_idx]
 
-        with h5py.File(f"{output_dir}/particle_data_batch{batch_idx}.h5", 'w') as f:
+        with h5py.File(os.path.join(timepoint_output_dir, f"particle_data_batch{batch_idx}.h5"), 'w') as f:
             for kec in kecs:
                 kec_group = f.create_group(f"kec_{kec:.1f}")
                 # 为每个时间点预创建数据集
@@ -241,7 +238,7 @@ def process_and_save_timepoint_data(batch_size=10):
                 # 计算L_shell和通量
                 L_shell_array = np.sqrt(batch_data[:, 1, :]**2 + batch_data[:, 2, :]**2 + batch_data[:, 3, :]**2)
                 kec_label_array = kec_label_batch(batch_data[:, 4, :])
-                flux_array = get_flux_batch(batch_data)
+                flux_array = get_flux_batch(batch_data, flux_csv_path=flux_csv_path)
                 flux_array = np.broadcast_to(flux_array[:, np.newaxis], np.shape(L_shell_array))
 
                 batch_data_new = np.zeros((batch_data.shape[0], batch_data.shape[1]+3, batch_data.shape[2]))
@@ -284,9 +281,9 @@ def process_and_save_timepoint_data(batch_size=10):
                 print(f"KEC {kec:.1f}: Particles per timestep = {particle_counts}")
 
 
-def process_and_save_initkec_data():
-    batch_files_folder = r"./result_compressedfield/results_batch/"
-    batch_files = glob.glob(batch_files_folder+"*.npy")
+def process_and_save_initkec_data(input_dir, output_dir, flux_csv_path="./observed_flux.csv"):
+    batch_files_folder = os.path.join(input_dir, "results_batch") # 使用 input_dir
+    batch_files = glob.glob(os.path.join(batch_files_folder, "*.npy"))
     file_shapes = {file: np.load(file, mmap_mode='r').shape[0] for file in batch_files} # 获取每个batch的粒子数
     particle_nums = sum(file_shapes[file] for file in batch_files) # 总粒子数
 
@@ -310,7 +307,7 @@ def process_and_save_initkec_data():
         time_length = batch_data.shape[2]
         L_shell_array = np.sqrt(batch_data[:, 1, :]**2 + batch_data[:, 2, :]**2, + batch_data[:, 3, :]**2)
         kec_label_array = kec_label_batch(batch_data[:, 4, :])
-        flux_array = get_flux_batch(batch_data)
+        flux_array = get_flux_batch(batch_data, flux_csv_path=flux_csv_path)
         flux_array = np.broadcast_to(flux_array[:, np.newaxis], np.shape(L_shell_array)) # 扩展至同一形状
         # 扩展数据结构, 将计算结果添加到batch数组中
         batch_data_new = np.zeros((batch_data.shape[0], batch_data.shape[1]+3, batch_data.shape[2]))
@@ -329,14 +326,14 @@ def process_and_save_initkec_data():
                 result_array[current_index:current_index+count] = batch_data_new[mask]
                 kec_indices[kec].append((current_index, current_index + count))
                 current_index += count
+    init_kec_output_dir = os.path.join(output_dir, "init_kec_batch") 
     for kec in kecs:
         try:
             kec_data = np.concatenate(
                 [result_array[start:end] for start, end in kec_indices[kec]], axis=0
             )
-            if not os.path.exists("./result_compressedfield/init_kec_batch/"):
-                os.makedirs("./result_compressedfield/init_kec_batch/")
-            np.save(f"./result_compressedfield/init_kec_batch/{kec:.1f}.npy", kec_data)
+            os.makedirs(init_kec_output_dir, exist_ok=True) # 使用 init_kec_output_dir
+            np.save(os.path.join(init_kec_output_dir, f"{kec:.1f}.npy"), kec_data) 
             print(f"kec={kec}, 数据形状: {kec_data.shape}")
         except Exception as e:
             print(f"kec={kec}, 数据形状: 0 {e}")
@@ -347,6 +344,23 @@ def process_and_save_initkec_data():
 # observed_flux = pd.merge(mageis_observed_flux, rept_observed_flux, how='outer')
 
 
-# if "__name__" == "__main__":
-process_and_save_timepoint_data()
-process_and_save_initkec_data()
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Process raw particle simulation results.")
+    parser.add_argument("input_dir", help="Path to the input directory containing 'results_batch'") # 输入目录
+    parser.add_argument("output_dir", help="Path to the output directory to save processed results") # 输出目录
+    parser.add_argument("--flux_csv", default="./observed_flux.csv", help="Path to the observed flux CSV file") # 通量CSV文件路径
+    parser.add_argument("--batch_size", type=int, default=10, help="Batch size for processing timepoint data") # 批次大小
+    # parser.add_argument("--interpolation_method", default='cubic', choices=['linear', 'cubic', 'quintic', 'spline'], help="Interpolation method for flux calculation") # 插值方法
+    parser.add_argument("--process_type", default="both", choices=["timepoint", "initkec", "both"], help="Type of processing to perform: timepoint, initkec, or both") # 处理类型
+
+    args = parser.parse_args()
+
+    if args.process_type in ["timepoint", "both"]:
+        process_and_save_timepoint_data(args.input_dir, args.output_dir, args.flux_csv, args.batch_size)
+    if args.process_type in ["initkec", "both"]:
+        process_and_save_initkec_data(args.input_dir, args.output_dir, args.flux_csv)
+
+    print("Preprocessing completed.")
+
+    # process_and_save_timepoint_data(input_dir=r"I:\Geoparticle-simulation\result_compressedfield", output_dir=r"I:\Geoparticle-simulation\result_compressedfield")
+    # process_and_save_initkec_data(input_dir=r"I:\Geoparticle-simulation\result_compressedfield", output_dir=r"I:\Geoparticle-simulation\result_compressedfield")
